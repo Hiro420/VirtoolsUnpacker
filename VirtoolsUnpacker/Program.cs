@@ -43,20 +43,17 @@ class VirtoolsUnpacker
 		if (args.Length < 1)
 		{
 			Console.WriteLine("Usage: VirtoolsUnpacker [options] <file.EXT>");
-			Console.WriteLine("\nOptions:\n-l        lists the archived files\n-d DIR    folder to extract the files to\n");
+			Console.WriteLine("\nOptions:\n-l        lists the archived files\n");
 			return;
 		}
 
 		Directory.CreateDirectory(OutputDir);
 
 		string? inputFile = null;
-		string? targetDir = null;
 
 		for (int i = 0; i < args.Length; i++)
 		{
 			if (args[i] == "-l") listOnly = true;
-			else if (args[i] == "-d" && i + 1 < args.Length)
-				targetDir = args[++i];
 			else if (!args[i].StartsWith("-"))
 				inputFile = args[i];
 		}
@@ -73,12 +70,6 @@ class VirtoolsUnpacker
 		{
 			Console.WriteLine("Error: file does not exist.");
 			return;
-		}
-
-		if (targetDir != null)
-		{
-			Console.WriteLine($"- change directory: {targetDir}");
-			Directory.SetCurrentDirectory(targetDir);
 		}
 
 		using var fs = new FileStream(inputFile, FileMode.Open, FileAccess.Read);
