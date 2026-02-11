@@ -1,7 +1,8 @@
 ﻿using System;
 using System.IO;
-using System.Text;
+using System.IO.Compression;
 using System.Runtime.InteropServices;
+using System.Text;
 
 class VirtoolsUnpacker
 {
@@ -222,7 +223,6 @@ class VirtoolsUnpacker
 		return files;
 	}
 
-	// Utility to safely read UInt32
 	static bool TryReadUInt32(BinaryReader br, out uint result)
 	{
 		result = 0;
@@ -246,7 +246,6 @@ class VirtoolsUnpacker
 		return theStruct;
 	}
 
-	// STUBS for compilation
 	static string VirtDate(uint val)
 	{
 		int year = (int)((val >> 25) & 0x7F) + 1980;
@@ -284,7 +283,7 @@ class VirtoolsUnpacker
 					return (uint)(fs.Position - read + i);
 			}
 
-			fs.Seek(-(signature.Length - 1), SeekOrigin.Current); // Overlap for partial match
+			fs.Seek(-(signature.Length - 1), SeekOrigin.Current);
 		}
 
 		return 0;
@@ -292,16 +291,48 @@ class VirtoolsUnpacker
 
 	static void VirtoolsCompobj(FileStream fs, string fname, uint inSize, uint outSize)
 	{
-		byte[] inData = new byte[inSize];
-		fs.Read(inData, 0, (int)inSize);
+		byte[] inData = ReadExactBytes(fs, (int)inSize);
+		string outPath = Path.Combine(OutputDir, fname);
 
-		using var inputStream = new MemoryStream(inData);
-		using var deflate = new System.IO.Compression.DeflateStream(inputStream, System.IO.Compression.CompressionMode.Decompress);
+		if (inSize == outSize)
+		{
+			File.WriteAllBytes(outPath, inData);
+			Console.WriteLine($"  {inSize,-10} {outSize,-10} {fname}  (stored)");
+			return;
+		}
+
 		byte[] outData = new byte[outSize];
-		deflate.Read(outData, 0, (int)outSize);
+		using var input = new MemoryStream(inData, writable: false);
+		using var z = new ZLibStream(input, CompressionMode.Decompress);
 
-		File.WriteAllBytes(Path.Combine(OutputDir, fname), outData);
+		ReadExact(z, outData);
+
+		File.WriteAllBytes(outPath, outData);
 		Console.WriteLine($"  {inSize,-10} {outSize,-10} {fname}");
+	}
+
+	static byte[] ReadExactBytes(Stream s, int count)
+	{
+		byte[] buf = new byte[count];
+		int off = 0;
+		while (off < count)
+		{
+			int r = s.Read(buf, off, count - off);
+			if (r <= 0) throw new EndOfStreamException("Unexpected EOF.");
+			off += r;
+		}
+		return buf;
+	}
+
+	static void ReadExact(Stream s, byte[] buf)
+	{
+		int off = 0;
+		while (off < buf.Length)
+		{
+			int r = s.Read(buf, off, buf.Length - off);
+			if (r <= 0) throw new InvalidDataException("Decompression ended early (output shorter than expected).");
+			off += r;
+		}
 	}
 
 	static void CheckBadName(ref string name)
