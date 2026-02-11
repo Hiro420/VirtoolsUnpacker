@@ -1,26 +1,23 @@
-﻿using System;
-using System.IO;
-using System.IO.Compression;
+﻿using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Text;
 
 class VirtoolsUnpacker
 {
 	const string VIRTOOLS_SIGN = "Nemo Fi\0";
-	const int BUFFSZ = 4096;
-	const string FILE1 = "components";
-	const string FILE2 = "objects";
-	static string OutputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Dump");
+	const int HEADER_SIZE = 64;
 
 	static bool listOnly = false;
+	static string OutputRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Dump");
 
 	[StructLayout(LayoutKind.Sequential, Pack = 1)]
 	struct Vmo
 	{
 		[MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)]
 		public byte[] sign;
-		public uint crc;
+
 		public uint date;
+		public uint crc;
 		public uint plugin1;
 		public uint plugin2;
 		public uint flags;
@@ -28,35 +25,122 @@ class VirtoolsUnpacker
 		public uint objcsz;
 		public uint objsz;
 		public uint addpath;
-		public uint components;
-		public uint objects;
+		public uint componentsCount;
+		public uint objectsCount;
 		public uint zero;
 		public uint version;
-		public uint compsz;
+		public uint componentsSize;
 	}
+
+	struct ComponentRecord
+	{
+		public int Id;
+		public int Type;
+		public int Offset;
+		public string Name;
+	}
+
+	struct ObjectSlice
+	{
+		public int Index;
+		public int Type;
+		public int Id;
+		public int Start;
+		public int Size;
+		public string Name;
+	}
+
+	static readonly Dictionary<int, string> TypeNames = new()
+	{
+		{ 1, "OBJECT" },
+		{ 2, "PARAMETERIN" },
+		{ 3, "PARAMETEROUT" },
+		{ 4, "PARAMETEROPERATION" },
+		{ 5, "STATE" },
+		{ 6, "BEHAVIORLINK" },
+		{ 8, "BEHAVIOR" },
+		{ 9, "BEHAVIORIO" },
+		{ 10, "SCENE" },
+		{ 11, "SCENEOBJECT" },
+		{ 12, "RENDERCONTEXT" },
+		{ 13, "KINEMATICCHAIN" },
+		{ 15, "OBJECTANIMATION" },
+		{ 16, "ANIMATION" },
+		{ 18, "KEYEDANIMATION" },
+		{ 19, "BEOBJECT" },
+		{ 20, "SYNCHRO" },
+		{ 21, "LEVEL" },
+		{ 22, "PLACE" },
+		{ 23, "GROUP" },
+		{ 24, "SOUND" },
+		{ 25, "WAVESOUND" },
+		{ 26, "MIDISOUND" },
+		{ 27, "ENTITY_2D" },
+		{ 28, "SPRITE" },
+		{ 29, "SPRITETEXT" },
+		{ 30, "MATERIAL" },
+		{ 31, "TEXTURE" },
+		{ 32, "MESH" },
+		{ 33, "ENTITY_3D" },
+		{ 34, "CAMERA" },
+		{ 35, "TARGETCAMERA" },
+		{ 36, "CURVEPOINT" },
+		{ 37, "SPRITE3D" },
+		{ 38, "LIGHT" },
+		{ 39, "TARGETLIGHT" },
+		{ 40, "CHARACTER" },
+		{ 41, "OBJECT_3D" },
+		{ 42, "BODYPART" },
+		{ 43, "CURVE" },
+		{ 45, "PARAMETERLOCAL" },
+		{ 46, "PARAMETER" },
+		{ 47, "RENDEROBJECT" },
+		{ 48, "INTERFACEOBJECTMANAGER" },
+		{ 49, "CRITICALSECTION" },
+		{ 50, "GRID" },
+		{ 51, "LAYER" },
+		{ 52, "DATAARRAY" },
+		{ 53, "PATCHMESH" },
+		{ 54, "PROGRESSIVEMESH" },
+		{ 55, "PARAMETERVARIABLE" },
+		{ 56, "POINTCLOUD_3D" },
+		{ 57, "VIDEO" },
+		{ 58, "MAXCLASSID" },
+		{ 80, "OBJECTARRAY" },
+		{ 81, "SCENEOBJECTDESC" },
+		{ 82, "ATTRIBUTEMANAGER" },
+		{ 83, "MESSAGEMANAGER" },
+		{ 84, "COLLISIONMANAGER" },
+		{ 85, "OBJECTMANAGER" },
+		{ 86, "FLOORMANAGER" },
+		{ 87, "RENDERMANAGER" },
+		{ 88, "BEHAVIORMANAGER" },
+		{ 89, "INPUTMANAGER" },
+		{ 90, "PARAMETERMANAGER" },
+		{ 91, "GRIDMANAGER" },
+		{ 92, "SOUNDMANAGER" },
+		{ 93, "TIMEMANAGER" },
+		{ 94, "VIDEOMANAGER" },
+		{ -1, "CUIKBEHDATA" },
+	};
 
 	static void Main(string[] args)
 	{
 		Console.OutputEncoding = Encoding.UTF8;
-		Console.WriteLine($"\nVirtools files unpacker, rewritten by Hiro420");
-		Console.WriteLine("GitHub: Hiro420, Original code by aluigi.altervista.org\n");
+		Console.WriteLine("\nVirtools (Nemo Fi) extractor\n");
 
 		if (args.Length < 1)
 		{
-			Console.WriteLine("Usage: VirtoolsUnpacker [options] <file.EXT>");
-			Console.WriteLine("\nOptions:\n-l        lists the archived files\n");
+			Console.WriteLine("Usage: VirtoolsUnpacker [options] <file.nmo>");
+			Console.WriteLine("Options:\n  -l        list only\n");
 			return;
 		}
 
-		Directory.CreateDirectory(OutputDir);
-
 		string? inputFile = null;
-
-		for (int i = 0; i < args.Length; i++)
+		foreach (var a in args)
 		{
-			if (args[i] == "-l") listOnly = true;
-			else if (!args[i].StartsWith("-"))
-				inputFile = args[i];
+			if (a == "-l") listOnly = true;
+			else if (!a.StartsWith("-")) inputFile = a;
 		}
 
 		if (inputFile == null)
@@ -64,251 +148,211 @@ class VirtoolsUnpacker
 			Console.WriteLine("Error: input file not provided.");
 			return;
 		}
-
-		Console.WriteLine($"- open file:        {inputFile}");
-
 		if (!File.Exists(inputFile))
 		{
 			Console.WriteLine("Error: file does not exist.");
 			return;
 		}
 
-		using var fs = new FileStream(inputFile, FileMode.Open, FileAccess.Read);
+		using var fs = new FileStream(inputFile, FileMode.Open, FileAccess.Read, FileShare.Read);
 		using var br = new BinaryReader(fs);
 
 		var vmo = ReadStruct<Vmo>(br);
-		long offset = fs.Position;
 
-		if (Encoding.ASCII.GetString(vmo.sign, 0, 4) == "VXBG")
+		string sig = Encoding.ASCII.GetString(vmo.sign);
+		if (sig != VIRTOOLS_SIGN)
 		{
-			int extracted = VxbgExtract(br, fs);
-			Console.WriteLine($"\n- {extracted} files {(listOnly ? "listed" : "extracted")}\n");
+			Console.WriteLine($"Error: unsupported signature: \"{sig}\" (expected Nemo Fi\\0)");
 			return;
 		}
 
-		if (Encoding.ASCII.GetString(vmo.sign) != VIRTOOLS_SIGN)
-		{
-			Console.WriteLine($"- file seems invalid, its signature is \"{Encoding.ASCII.GetString(vmo.sign)}\"");
-			Console.Write("- do you want to scan it for valid Virtools data (y/N)? ");
-			string? ans = Console.ReadLine();
-			if (ans?.ToLower() != "y") return;
-
-			offset = VirtoolsScan(br, fs);
-			if (offset == 0)
-			{
-				Console.WriteLine("\nError: no valid signature found");
-				return;
-			}
-			Console.WriteLine($"- Virtools signature found at offset 0x{offset:X8}");
-			fs.Seek(offset, SeekOrigin.Begin);
-			vmo = ReadStruct<Vmo>(br);
-		}
-
-		Console.WriteLine($"- date              {VirtDate(vmo.date)}");
-		Console.WriteLine($"- components:       {vmo.components}");
-		Console.WriteLine($"- objects:          {vmo.objects}");
+		Console.WriteLine($"- file:             {inputFile}");
+		Console.WriteLine($"- date:             {VirtDate(vmo.date)}");
+		Console.WriteLine($"- compcsz:          0x{vmo.compcsz:X8}  componentsSize: 0x{vmo.componentsSize:X8}");
+		Console.WriteLine($"- objcsz:           0x{vmo.objcsz:X8}  objsz:          0x{vmo.objsz:X8}");
+		Console.WriteLine($"- componentsCount:  {vmo.componentsCount}");
+		Console.WriteLine($"- objectsCount:     {vmo.objectsCount}");
 		Console.WriteLine($"- version:          {vmo.version >> 24}.{(vmo.version >> 16) & 0xFF}.{(vmo.version >> 8) & 0xFF}.{vmo.version & 0xFF}");
 
-		Console.WriteLine("\n- additional raw info:");
-		Console.WriteLine($"  signature         {Encoding.ASCII.GetString(vmo.sign)}");
-		Console.WriteLine($"  crc               {vmo.crc:X8}");
-		Console.WriteLine($"  plugin1           {vmo.plugin1:X8}");
-		Console.WriteLine($"  plugin2           {vmo.plugin2:X8}");
-		Console.WriteLine($"  flags             {vmo.flags:X8}");
-		Console.WriteLine($"  compcsz           {vmo.compcsz:X8}");
-		Console.WriteLine($"  objcsz            {vmo.objcsz:X8}");
-		Console.WriteLine($"  objsz             {vmo.objsz:X8}");
-		Console.WriteLine($"  addpath           {vmo.addpath:X8}");
-		Console.WriteLine($"  components        {vmo.components:X8}");
-		Console.WriteLine($"  objects           {vmo.objects:X8}");
-		Console.WriteLine($"  zero              {vmo.zero:X8}");
-		Console.WriteLine($"  version           {vmo.version:X8}");
-		Console.WriteLine($"  compsz            {vmo.compsz:X8}");
-
-		long totalSize = vmo.compcsz + vmo.objcsz + Marshal.SizeOf<Vmo>();
-		if (totalSize > fs.Length)
+		long need = HEADER_SIZE + (long)vmo.compcsz + (long)vmo.objcsz;
+		if (need > fs.Length)
 		{
-			Console.WriteLine("\nError: components and objects exceed file size");
+			Console.WriteLine("Error: file truncated (header+blocks exceed file size).");
 			return;
 		}
 
-		Console.WriteLine("\n  insize     outsize    filename");
-		Console.WriteLine("  ------------------------------");
+		fs.Position = HEADER_SIZE;
+		byte[] compRaw = ReadExactBytes(fs, checked((int)vmo.compcsz));
+		byte[] objRaw = ReadExactBytes(fs, checked((int)vmo.objcsz));
 
-		if (listOnly)
+		byte[] compData = (vmo.componentsSize == vmo.compcsz)
+			? compRaw
+			: ZlibDecompressExact(compRaw, checked((int)vmo.componentsSize));
+
+		byte[] objData = (vmo.objcsz == vmo.objsz)
+			? objRaw
+			: ZlibDecompressExact(objRaw, checked((int)vmo.objsz));
+
+		string baseOut = Path.Combine(OutputRoot, Path.GetFileNameWithoutExtension(inputFile));
+		string objectsDir = Path.Combine(baseOut, "objects");
+		Directory.CreateDirectory(baseOut);
+		Directory.CreateDirectory(objectsDir);
+
+		if (!listOnly)
 		{
-			Console.WriteLine($"  {vmo.compcsz,-10} {vmo.compsz,-10} {FILE1}");
-			Console.WriteLine($"  {vmo.objcsz,-10} {vmo.objsz,-10} {FILE2}");
-		}
-		else
-		{
-			VirtoolsCompobj(fs, FILE1, vmo.compcsz, vmo.compsz);
-			fs.Seek(offset + vmo.compcsz, SeekOrigin.Begin);
-			VirtoolsCompobj(fs, FILE2, vmo.objcsz, vmo.objsz);
-		}
-
-		fs.Seek(offset + vmo.compcsz + vmo.objcsz, SeekOrigin.Begin);
-		int fileCount = 2;
-
-		while (true)
-		{
-			if (fs.Position + 4 > fs.Length) break;
-			uint len = br.ReadUInt32();
-			if (len >= BUFFSZ) break;
-
-			byte[] nameBytes = br.ReadBytes((int)len);
-			if (nameBytes.Length < len) break;
-
-			string name = Encoding.UTF8.GetString(nameBytes);
-			if (string.IsNullOrEmpty(name)) break;
-
-			if (fs.Position + 4 > fs.Length) break;
-			uint size = br.ReadUInt32();
-			Console.WriteLine($"             {size,-10} {name}");
-
-			if (listOnly)
-			{
-				fs.Seek(size, SeekOrigin.Current);
-			}
-			else
-			{
-				CheckBadName(ref name);
-				GetFile(fs, name, size);
-			}
-
-			fileCount++;
+			File.WriteAllBytes(Path.Combine(baseOut, "components.bin"), compData);
+			File.WriteAllBytes(Path.Combine(baseOut, "objects.bin"), objData);
 		}
 
-		Console.WriteLine($"\n- {fileCount} files {(listOnly ? "listed" : "extracted")}\n");
-	}
+		var records = ParseComponentRecords(compData, checked((int)vmo.componentsCount));
+		int baseAbs = HEADER_SIZE + checked((int)vmo.componentsSize);
+		var slices = BuildObjectSlices(records, baseAbs, checked((int)vmo.objsz));
 
-	static int VxbgExtract(BinaryReader br, FileStream fs)
-	{
-		uint offset, start, size;
-		int files = 0;
-		byte[] fname = new byte[BUFFSZ];
-		int c;
+		Console.WriteLine("\n  idx  start      size       type                 id        name");
+		Console.WriteLine("  -------------------------------------------------------------------------");
 
-		fs.Seek(4, SeekOrigin.Begin);
-		if (!TryReadUInt32(br, out offset)) return files;
+		string manifestPath = Path.Combine(baseOut, "manifest.tsv");
+		using var manifest = new StreamWriter(manifestPath, false, new UTF8Encoding(false));
+		manifest.WriteLine("index\tstart\tsize\ttype\tid\tname\tfile");
 
-		Console.WriteLine("\n  offset   size       filename");
-		Console.WriteLine("  ----------------------------");
-
-		offset += 8;
-		start = offset;
-
-		while (fs.Position < start)
+		int extracted = 0;
+		foreach (var s in slices)
 		{
-			for (int i = 0; i < BUFFSZ; i++)
-			{
-				c = fs.ReadByte();
-				if (c < 0) return files;
-				fname[i] = (byte)c;
-				if (c == 0) break;
-			}
+			string typeName = TypeNames.TryGetValue(s.Type, out var tn) ? tn : $"TYPE_{s.Type}";
+			Console.WriteLine($"  {s.Index,3}  0x{s.Start:X8}  0x{s.Size:X8}  {typeName,-20}  {s.Id,8}  {s.Name}");
 
-			if (!TryReadUInt32(br, out size)) return files;
+			string safeName = SanitizeFileName(s.Name);
+			string outName = $"{s.Index:0000}_{typeName}_{s.Id}_{safeName}.bin";
+			string outPath = Path.Combine(objectsDir, outName);
 
-			string name = Encoding.UTF8.GetString(fname, 0, Array.IndexOf(fname, (byte)0));
-			Console.WriteLine($"  {offset:X8} {size,-10} {name}");
+			manifest.WriteLine($"{s.Index}\t{s.Start}\t{s.Size}\t{typeName}\t{s.Id}\t{s.Name}\tobjects/{outName}");
 
 			if (!listOnly)
-				GetFile(fs, name, size, (int)offset);
-
-			offset += size;
-			files++;
-		}
-
-		return files;
-	}
-
-	static bool TryReadUInt32(BinaryReader br, out uint result)
-	{
-		result = 0;
-		try
-		{
-			result = br.ReadUInt32();
-			return true;
-		}
-		catch
-		{
-			return false;
-		}
-	}
-
-	static T ReadStruct<T>(BinaryReader reader) where T : struct
-	{
-		byte[] bytes = reader.ReadBytes(Marshal.SizeOf<T>());
-		GCHandle handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
-		T theStruct = Marshal.PtrToStructure<T>(handle.AddrOfPinnedObject());
-		handle.Free();
-		return theStruct;
-	}
-
-	static string VirtDate(uint val)
-	{
-		int year = (int)((val >> 25) & 0x7F) + 1980;
-		int month = (int)((val >> 21) & 0x0F);
-		int day = (int)((val >> 16) & 0x1F);
-		int hour = (int)((val >> 11) & 0x1F);
-		int minute = (int)((val >> 5) & 0x3F);
-		int second = (int)((val & 0x1F) * 2);
-		return $"{year:D4}-{month:D2}-{day:D2} {hour:D2}:{minute:D2}:{second:D2}";
-	}
-
-	static uint VirtoolsScan(BinaryReader br, FileStream fs)
-	{
-		byte[] signature = Encoding.ASCII.GetBytes(VIRTOOLS_SIGN);
-		byte[] buffer = new byte[BUFFSZ];
-
-		fs.Seek(0, SeekOrigin.Begin);
-
-		while (fs.Position < fs.Length)
-		{
-			int read = fs.Read(buffer, 0, buffer.Length);
-			for (int i = 0; i <= read - signature.Length; i++)
 			{
-				bool match = true;
-				for (int j = 0; j < signature.Length; j++)
-				{
-					if (buffer[i + j] != signature[j])
-					{
-						match = false;
-						break;
-					}
-				}
+				if (s.Start < 0 || s.Size < 0 || s.Start + s.Size > objData.Length)
+					throw new InvalidDataException($"Slice out of range: idx={s.Index} start={s.Start} size={s.Size}");
 
-				if (match)
-					return (uint)(fs.Position - read + i);
+				File.WriteAllBytes(outPath, objData.AsSpan(s.Start, s.Size).ToArray());
+				extracted++;
 			}
-
-			fs.Seek(-(signature.Length - 1), SeekOrigin.Current);
 		}
 
-		return 0;
+		if (!listOnly)
+			Console.WriteLine($"\nDone. Extracted {extracted} object slices to: {objectsDir}");
+		else
+			Console.WriteLine($"\nDone. Listed {slices.Count} object slices.");
+
+		Console.WriteLine($"Manifest: {manifestPath}");
 	}
 
-	static void VirtoolsCompobj(FileStream fs, string fname, uint inSize, uint outSize)
+	static List<ComponentRecord> ParseComponentRecords(byte[] compData, int count)
 	{
-		byte[] inData = ReadExactBytes(fs, (int)inSize);
-		string outPath = Path.Combine(OutputDir, fname);
+		var list = new List<ComponentRecord>(count);
+		using var ms = new MemoryStream(compData, writable: false);
+		using var br = new BinaryReader(ms);
 
-		if (inSize == outSize)
+		for (int i = 0; i < count; i++)
 		{
-			File.WriteAllBytes(outPath, inData);
-			Console.WriteLine($"  {inSize,-10} {outSize,-10} {fname}  (stored)");
-			return;
+			if (ms.Position + 16 > ms.Length)
+				throw new InvalidDataException($"Component record {i}: truncated header.");
+
+			int id = br.ReadInt32();
+			int type = br.ReadInt32();
+			int offset = br.ReadInt32();
+			int nameLen = br.ReadInt32();
+
+			if (nameLen < 0 || ms.Position + nameLen > ms.Length)
+				throw new InvalidDataException($"Component record {i}: invalid nameLen={nameLen}.");
+
+			byte[] nameBytes = br.ReadBytes(nameLen);
+			string name = DecodeCString(nameBytes);
+
+			list.Add(new ComponentRecord
+			{
+				Id = id,
+				Type = type,
+				Offset = offset,
+				Name = name
+			});
 		}
 
-		byte[] outData = new byte[outSize];
-		using var input = new MemoryStream(inData, writable: false);
-		using var z = new ZLibStream(input, CompressionMode.Decompress);
+		return list;
+	}
 
-		ReadExact(z, outData);
+	static List<ObjectSlice> BuildObjectSlices(List<ComponentRecord> records, int baseAbs, int objsz)
+	{
+		if (records.Count == 0)
+			return new List<ObjectSlice>();
 
-		File.WriteAllBytes(outPath, outData);
-		Console.WriteLine($"  {inSize,-10} {outSize,-10} {fname}");
+		records.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+
+		int fileObjEndAbs = baseAbs + objsz;
+
+		int firstSize = records[0].Offset - baseAbs;
+		if (firstSize < 0) throw new InvalidDataException("First offset is before objects start.");
+
+		var slices = new List<ObjectSlice>(records.Count + 1);
+
+		slices.Add(new ObjectSlice
+		{
+			Index = 0,
+			Type = 4,
+			Id = 0,
+			Start = 0,
+			Size = firstSize,
+			Name = "PARAMETEROPERATION"
+		});
+
+		for (int i = 0; i < records.Count; i++)
+		{
+			int startAbs = records[i].Offset;
+			int startRel = startAbs - baseAbs;
+
+			int endAbs;
+			if (i + 1 < records.Count)
+				endAbs = records[i + 1].Offset;
+			else
+				endAbs = fileObjEndAbs;
+
+			int size = endAbs - startAbs;
+			if (size < 0) throw new InvalidDataException("Offsets not monotonic after sorting.");
+			if (startRel < 0) throw new InvalidDataException("Record offset before objects base.");
+
+			slices.Add(new ObjectSlice
+			{
+				Index = i + 1,
+				Type = records[i].Type,
+				Id = records[i].Id,
+				Start = startRel,
+				Size = size,
+				Name = string.IsNullOrWhiteSpace(records[i].Name) ? $"unnamed_{i}" : records[i].Name
+			});
+		}
+
+		return slices;
+	}
+
+
+	static byte[] ZlibDecompressExact(byte[] input, int expectedSize)
+	{
+		byte[] output = new byte[expectedSize];
+		using var ms = new MemoryStream(input, writable: false);
+		using var zs = new ZLibStream(ms, CompressionMode.Decompress);
+
+		ReadExact(zs, output);
+		return output;
+	}
+
+	static void ReadExact(Stream s, byte[] buffer)
+	{
+		int off = 0;
+		while (off < buffer.Length)
+		{
+			int r = s.Read(buffer, off, buffer.Length - off);
+			if (r <= 0)
+				throw new InvalidDataException("Decompression ended early (output shorter than expected).");
+			off += r;
+		}
 	}
 
 	static byte[] ReadExactBytes(Stream s, int count)
@@ -324,38 +368,44 @@ class VirtoolsUnpacker
 		return buf;
 	}
 
-	static void ReadExact(Stream s, byte[] buf)
+	static string DecodeCString(byte[] bytes)
 	{
-		int off = 0;
-		while (off < buf.Length)
-		{
-			int r = s.Read(buf, off, buf.Length - off);
-			if (r <= 0) throw new InvalidDataException("Decompression ended early (output shorter than expected).");
-			off += r;
-		}
+		int n = Array.IndexOf(bytes, (byte)0);
+		if (n < 0) n = bytes.Length;
+		return Encoding.UTF8.GetString(bytes, 0, n);
 	}
 
-	static void CheckBadName(ref string name)
+	static string SanitizeFileName(string name)
 	{
+		if (string.IsNullOrEmpty(name)) return "noname";
 		foreach (var c in Path.GetInvalidFileNameChars())
 			name = name.Replace(c, '_');
-
 		name = name.Replace("..", "_");
+		name = name.Trim();
+		if (name.Length == 0) name = "noname";
+		if (name.Length > 160) name = name.Substring(0, 160);
+		return name;
 	}
 
-	static void GetFile(FileStream fs, string fname, uint size, int offset = -1)
+	static T ReadStruct<T>(BinaryReader reader) where T : struct
 	{
-		long curOffset = fs.Position;
-		if (offset >= 0)
-			fs.Seek(offset, SeekOrigin.Begin);
+		int sz = Marshal.SizeOf<T>();
+		byte[] bytes = reader.ReadBytes(sz);
+		if (bytes.Length != sz) throw new EndOfStreamException("Unexpected EOF while reading header.");
 
-		byte[] buffer = new byte[size];
-		int bytesRead = fs.Read(buffer, 0, (int)size);
-		if (bytesRead != size)
-			throw new IOException("Failed to read the expected number of bytes.");
+		GCHandle handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+		try { return Marshal.PtrToStructure<T>(handle.AddrOfPinnedObject()); }
+		finally { handle.Free(); }
+	}
 
-		File.WriteAllBytes(Path.Combine(OutputDir, fname), buffer);
-		// Console.WriteLine($"             {size,-10} {fname}");
-		fs.Position = curOffset;
+	static string VirtDate(uint val)
+	{
+		int year = (int)((val >> 25) & 0x7F) + 1980;
+		int month = (int)((val >> 21) & 0x0F);
+		int day = (int)((val >> 16) & 0x1F);
+		int hour = (int)((val >> 11) & 0x1F);
+		int minute = (int)((val >> 5) & 0x3F);
+		int second = (int)((val & 0x1F) * 2);
+		return $"{year:D4}-{month:D2}-{day:D2} {hour:D2}:{minute:D2}:{second:D2}";
 	}
 }
